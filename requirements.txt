@@ -1,0 +1,6 @@
+playwright>=1.47
+openai>=1.40
+python-dotenv>=1.0
+PyMySQL>=1.1
+mcp>=1.0  # MCP client for the vision agent (--mode mcp), drives @playwright/mcp
+tqdm>=4.66  # progress bar for the DB workflow

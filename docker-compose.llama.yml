@@ -1,0 +1,76 @@
+# llama.cpp OpenAI-compatible server for local agent mode (with VISION).
+#
+# Tuned for a single 12 GB NVIDIA GPU running Qwen2.5-VL-7B-Instruct (Q4_K_M)
+# with its multimodal projector, so the MCP/vision agent can see screenshots
+# and handle popups. The radiofinder agent talks to this via its
+# OpenAI-compatible /v1 endpoint - point OPENAI_BASE_URL at
+# http://<host>:8080/v1.
+#
+# Prereqs on the host:
+#   - NVIDIA driver + NVIDIA Container Toolkit installed
+#     (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/)
+#   - `docker compose` v2
+#
+# Run:   docker compose -f docker-compose.llama.yml up -d
+# Logs:  docker compose -f docker-compose.llama.yml logs -f
+# Stop:  docker compose -f docker-compose.llama.yml down
+#
+# VRAM budget @ Q4_K_M + F16 mmproj on 12 GB:
+#   weights ~4.7 GB + mmproj ~1.4 GB + KV/image-embeddings/overhead ~3-4 GB
+#   ~= 9-10 GB, fits with headroom for screenshot tokens.
+services:
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: radiofinder-llama
+    ports:
+      # The server has no auth. It is bound here to all interfaces so the app on
+      # another host (192.168.1.7 in this setup) can reach it - keep it on a
+      # trusted LAN only, or change to "127.0.0.1:8080:8080" for local-only.
+      - "8080:8080"
+    volumes:
+      # Cache downloaded GGUF weights + mmproj on the host so restarts don't
+      # re-download (several GB).
+      - ./models:/root/.cache/llama.cpp
+    environment:
+      # Text-only fallbacks (no vision) if you ever want them:
+      #   Qwen/Qwen3-8B-GGUF:Q4_K_M   ~5 GB
+      #   Qwen/Qwen3-14B-GGUF:Q4_K_M  ~9 GB
+      # Vision model in use (repo:quant); its projector is passed via --mmproj.
+      LLAMA_MODEL: "${LLAMA_MODEL:-unsloth/Qwen2.5-VL-7B-Instruct-GGUF:Q4_K_M}"
+    # llama-server flags tuned for 12 GB VRAM with vision.
+    #   For a VL repo, -hf AUTO-DOWNLOADS the matching multimodal projector
+    #   (this repo ships mmproj-F16.gguf), so no separate flag is needed on
+    #   current builds. WITHOUT a projector the server rejects image input
+    #   ("you may need to provide the mmproj").
+    #   If your build does NOT auto-load it, uncomment the --mmproj-url line
+    #   below (the projector is cached in ./models after the first download).
+    #   KV cache is left at the F16 default (quantized KV can degrade VL image
+    #   handling); ctx=8192 leaves room since screenshots are token heavy.
+    command: >
+      -hf ${LLAMA_MODEL:-unsloth/Qwen2.5-VL-7B-Instruct-GGUF:Q4_K_M}
+      --host 0.0.0.0
+      --port 8080
+      --jinja
+      --n-gpu-layers 99
+      --ctx-size 8192
+      --flash-attn on
+      --parallel 1
+      --cont-batching
+    # If -hf does not auto-load the projector on your build, add this line to the
+    # command above (right after the -hf line):
+    #   --mmproj-url https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/mmproj-F16.gguf
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      # VL model + mmproj is a larger download; give it longer to become ready.
+      start_period: 300s
