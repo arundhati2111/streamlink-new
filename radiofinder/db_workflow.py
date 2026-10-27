@@ -6,6 +6,7 @@ new_stream_link / source / status.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 
 from tqdm import tqdm
@@ -27,15 +28,20 @@ log = get_logger()
 DB_PLATFORMS = ["onlineradiobox"]
 
 
-async def _is_working(page, url: str) -> bool:
+async def _is_working(page, url: str, probe_timeout_s: int = 8) -> bool:
     """Authoritative playability check.
 
     Prefer ffprobe (actually decodes audio, handles endless Icecast/SHOUTcast
     streams and HLS). Fall back to the HTTP header heuristic only if ffprobe
     isn't installed.
+
+    probe_timeout_s bounds how long ffprobe waits on a slow/dead stream. A
+    healthy stream advertises its codec within a couple of seconds, so a tight
+    timeout mainly cuts the dead-stream penalty (the single biggest time sink in
+    this workflow) without rejecting good streams.
     """
     if ffprobe_available():
-        return await is_stream_playable(url)
+        return await is_stream_playable(url, timeout_s=probe_timeout_s)
     return await check_stream_alive(page, url)
 
 
@@ -84,7 +90,8 @@ def _best_stream(
 
 
 async def _resolve_relevant(
-    page, check_page, platform, search_q: str, rel_q: str
+    page, check_page, platform, search_q: str, rel_q: str,
+    probe_timeout_s: int = 8, probe_concurrency: int = 6,
 ) -> list[StationResult]:
     """Rule-mode pipeline for one platform: search all -> filter -> resolve -> verify.
 
@@ -93,23 +100,49 @@ async def _resolve_relevant(
       only pay to resolve streams for plausibly-correct stations.
     - each resolved stream is playability-checked (ffprobe) before we keep it,
       so anything _best_stream later picks is already known to work.
+
+    Playability checks dominate the runtime, and a dead stream costs the full
+    probe timeout. Historically every survivor was probed one-by-one, so a
+    popular name with many same-named stations worldwide could stack dozens of
+    sequential timeouts (minutes per station). Instead we resolve all survivors
+    first (cheap: onlineradiobox carries the stream URL in the DOM, no extra
+    fetch) then probe them concurrently with a bounded pool, so the slow dead
+    ones overlap instead of adding up.
     """
     candidates = await platform.search(page, search_q)
     survivors = [
         c for c in candidates if is_relevant(rel_q, c.name, c.country)
     ]
-    working: list[StationResult] = []
+
+    # Resolve first (cheap), collecting every candidate that yields a stream URL.
+    resolved: list[StationResult] = []
     for cand in survivors:
         try:
             res = await platform.resolve(page, cand)
         except Exception as exc:
             print(f"  [{platform.name}] resolve failed for '{cand.name}': {exc}")
             continue
-        if res is None or not res.stream_url:
-            continue
-        if await _is_working(check_page, res.stream_url):
-            working.append(res)
-    return working
+        if res is not None and res.stream_url:
+            resolved.append(res)
+
+    if not resolved:
+        return []
+
+    # Probe concurrently with a bounded pool so dead-stream timeouts overlap
+    # rather than serialise. Each probe returns the result if it plays, else None.
+    # ffprobe runs as independent subprocesses (safe to parallelise); the
+    # browser-based fallback shares one page and must stay serial, so drop to a
+    # pool of 1 when ffprobe isn't available.
+    pool = max(1, int(probe_concurrency)) if ffprobe_available() else 1
+    sem = asyncio.Semaphore(pool)
+
+    async def _probe(res: StationResult) -> StationResult | None:
+        async with sem:
+            ok = await _is_working(check_page, res.stream_url, probe_timeout_s)
+            return res if ok else None
+
+    outcomes = await asyncio.gather(*(_probe(r) for r in resolved))
+    return [r for r in outcomes if r is not None]
 
 
 # Trailing frequency/band clutter in station names, e.g. " - 104.9 FM", "97.1FM".
@@ -187,11 +220,13 @@ async def process_pending(
     # Running tally shown live on the progress bar.
     tally = {"ok": 0, "new": 0, "dead": 0, "err": 0}
     with Database(config) as db:
-        stations = db.fetch_pending_stations(limit=limit_stations)
+        # Pending rows (status=0) PLUS already-resolved rows whose updated_dt is
+        # older than STALE_AFTER_DAYS, so links are re-verified before they rot.
+        stations = db.fetch_stations_to_process(limit=limit_stations)
         if not stations:
-            log.info("No pending stations (status=0) to process.")
+            log.info("No pending or stale stations to process.")
             return 0
-        log.info("Fetched %d pending station(s).", len(stations))
+        log.info("Fetched %d station(s) to process (pending + stale).", len(stations))
 
         browser = BrowserManager(
             headless=config.headless, nav_timeout_ms=config.nav_timeout_ms
@@ -215,7 +250,9 @@ async def process_pending(
 
                 # 1) Is the existing stream_link still working? If so, status=1
                 #    on all rows with this st_id; do NOT fill new_stream_link.
-                alive = await _is_working(check_page, st.stream_link)
+                alive = await _is_working(
+                    check_page, st.stream_link, config.probe_timeout_s
+                )
                 if alive:
                     log.info(
                         "st_id=%s '%s': existing link OK -> status=1 (%s)",
@@ -239,7 +276,8 @@ async def process_pending(
                     try:
                         if mode == "rule":
                             found = await _resolve_relevant(
-                                page, check_page, platform, search_q, rel_q
+                                page, check_page, platform, search_q, rel_q,
+                                config.probe_timeout_s, config.probe_concurrency,
                             )
                         else:
                             found = await run_agent(
@@ -260,7 +298,9 @@ async def process_pending(
                 if (
                     best is not None
                     and mode != "rule"
-                    and not await _is_working(check_page, best.stream_url)
+                    and not await _is_working(
+                        check_page, best.stream_url, config.probe_timeout_s
+                    )
                 ):
                     log.info(
                         "st_id=%s '%s': candidate %s did not verify, discarding",

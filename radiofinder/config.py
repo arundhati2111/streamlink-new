@@ -38,6 +38,9 @@ class Config:
     nav_timeout_ms: int
     stream_wait_seconds: int
     output_csv: str
+    # Playability (ffprobe) tuning for the DB workflow.
+    probe_timeout_s: int        # per-stream ffprobe read timeout
+    probe_concurrency: int      # how many candidate streams to probe at once
     # Database (local MySQL) settings
     db_host: str
     db_port: int
@@ -55,6 +58,8 @@ class Config:
             nav_timeout_ms=_get_int("NAV_TIMEOUT_MS", 30000),
             stream_wait_seconds=_get_int("STREAM_WAIT_SECONDS", 6),
             output_csv=os.getenv("OUTPUT_CSV", "output/streams.csv"),
+            probe_timeout_s=_get_int("PROBE_TIMEOUT_S", 8),
+            probe_concurrency=_get_int("PROBE_CONCURRENCY", 6),
             db_host=os.getenv("DB_HOST", "127.0.0.1"),
             db_port=_get_int("DB_PORT", 3306),
             db_user=os.getenv("DB_USER", "root"),
