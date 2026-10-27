@@ -169,6 +169,7 @@ class Streema(Platform):
             stream_type=stype,
             page_url=cand.page_url,
             mode="rule",
+            description=cand.description,
         )
 
 

@@ -38,6 +38,9 @@ class Station:
     st_country: str
     stream_link: str
     row_ids: list[int]
+    st_freq: str = ""
+    st_city: str = ""
+    st_state: str = ""
 
 
 def _now() -> str:
@@ -92,7 +95,8 @@ class Database:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT id, st_id, st_name, st_country, stream_link
+                SELECT id, st_id, st_name, st_freq, st_city, st_state,
+                       st_country, stream_link
                 FROM `{TABLE}`
                 WHERE status = %s
                 ORDER BY st_id, id
@@ -113,6 +117,9 @@ class Database:
                     st_country=r["st_country"],
                     stream_link=r["stream_link"],
                     row_ids=[],
+                    st_freq=(r.get("st_freq") or ""),
+                    st_city=(r.get("st_city") or ""),
+                    st_state=(r.get("st_state") or ""),
                 )
                 by_stid[sid] = st
             st.row_ids.append(r["id"])

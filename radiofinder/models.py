@@ -33,6 +33,8 @@ class StationResult:
     page_url: str = ""
     station_id: str = ""
     mode: str = ""             # rule | agent
+    description: str = ""      # extra platform text (slogan/location/tags) used
+                               # for city/state/frequency soft-matching
     extracted_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )

@@ -117,32 +117,43 @@ class TuneIn(Platform):
         )
         return options[0].get("url", "")
 
-    async def _country(self, page: Page, gid: str) -> str:
-        """Country from Describe.ashx location ('City, Country') if available."""
+    async def _describe(self, page: Page, gid: str) -> tuple[str, str]:
+        """Return (country, location) from Describe.ashx.
+
+        location is the raw 'City, Country' string (used as a description for
+        city/state soft-matching); country is its last segment. Also folds in
+        any 'slogan'/'description' text the API provides.
+        """
         data = await self._get_json(page, f"{DESCRIBE_API}?id={gid}&render=json")
         if not isinstance(data, dict):
-            return ""
+            return "", ""
         body = data.get("body") or []
         if not body or not isinstance(body[0], dict):
-            return ""
-        location = body[0].get("location") or ""
-        return location.split(",")[-1].strip() if location else ""
+            return "", ""
+        first = body[0]
+        location = first.get("location") or ""
+        country = location.split(",")[-1].strip() if location else ""
+        slogan = first.get("slogan") or first.get("description") or ""
+        description = " ".join(b for b in (location, slogan) if b).strip()
+        return country, description
 
     async def resolve(self, page: Page, cand: Candidate) -> StationResult | None:
         gid = cand.ref
         stream = await self._stream(page, gid)
         if not stream:
             return None
+        country, description = await self._describe(page, gid)
         return StationResult(
             platform=self.name,
             query="",
             name=cand.name,
-            country=await self._country(page, gid),
+            country=country,
             stream_url=stream,
             stream_type=classify_stream(stream),
             page_url=cand.page_url,
             station_id=cand.station_id,
             mode="rule",
+            description=description,
         )
 
 

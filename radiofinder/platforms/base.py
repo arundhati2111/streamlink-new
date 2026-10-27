@@ -39,6 +39,9 @@ class Candidate:
     #: some platforms (radio.net API) already know the stream at search time;
     #: resolve() can use it directly instead of another fetch.
     stream_url: str = ""
+    #: extra platform text (slogan, location line, tags) carried from search()
+    #: so resolve() can pass it on for city/state/frequency soft-matching.
+    description: str = ""
 
 
 class Platform(ABC):

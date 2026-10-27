@@ -16,11 +16,15 @@ from .db import Database, Station
 from .logging_setup import get_logger
 from .models import StationResult
 from .platforms import get_platform
-from .relevance import is_relevant
+from .relevance import is_relevant, location_score
 from .runner import _apply_config_to_platform
 from .validate import ffprobe_available, is_stream_playable
 
 log = get_logger()
+
+# The DB repair workflow fetches replacement links from onlineradiobox only.
+# (Query/CSV mode still searches all platforms; this restriction is DB-only.)
+DB_PLATFORMS = ["onlineradiobox"]
 
 
 async def _is_working(page, url: str) -> bool:
@@ -39,18 +43,43 @@ async def _is_working(page, url: str) -> bool:
 _TYPE_RANK = {"hls": 3, "mp3": 3, "aac": 3, "audio": 2, "dash": 2, "ogg": 2, "": 0}
 
 
-def _score(result: StationResult) -> int:
+def _type_score(result: StationResult) -> int:
     return _TYPE_RANK.get(result.stream_type, 1)
 
 
-def _best_stream(query: str, results: list[StationResult]) -> StationResult | None:
-    """Pick the best relevant result: relevant first, then playable type."""
+def _best_stream(
+    query: str, results: list[StationResult], station: Station | None = None
+) -> StationResult | None:
+    """Pick the best relevant result.
+
+    Country is already enforced as a hard gate by is_relevant(). Among the
+    survivors we rank by, in order:
+      1) location/frequency soft score - how well the candidate's name/
+         description matches the DB station's st_freq / st_city / st_state
+         (see relevance.location_score); higher is better.
+      2) stream type - prefer a directly-playable stream over an external
+         link-out, as a tiebreaker when the location signal is equal.
+    """
     relevant = [
         r for r in results if r.stream_url and is_relevant(query, r.name, r.country)
     ]
     if not relevant:
         return None
-    relevant.sort(key=_score, reverse=True)
+
+    def _loc(r: StationResult) -> int:
+        if station is None:
+            return 0
+        return location_score(
+            db_freq=station.st_freq,
+            db_city=station.st_city,
+            db_state=station.st_state,
+            name=r.name,
+            description=r.description,
+        )
+
+    # Sort by location/frequency match first, then stream type. Python's sort is
+    # stable, so platform/discovery order breaks any remaining ties.
+    relevant.sort(key=lambda r: (_loc(r), _type_score(r)), reverse=True)
     return relevant[0]
 
 
@@ -107,7 +136,13 @@ def _search_query(st: Station) -> str:
 
 
 def _relevance_query(st: Station) -> str:
-    """What relevance uses: cleaned name + country, so country is enforced."""
+    """What relevance uses: cleaned name + country, so country is enforced.
+
+    Only name + country go here. Country is the single HARD gate in
+    is_relevant(); city/state/frequency are applied separately as SOFT ranking
+    signals in _best_stream() via relevance.location_score(), so they must not
+    leak into the relevance query (that would turn them into a gate).
+    """
     name = _clean_name(st.st_name or "")
     country = (st.st_country or "").strip()
     return f"{name}, {country}" if country else name
@@ -124,9 +159,20 @@ async def process_pending(
     """Process pending DB stations. Returns the number of rows updated.
 
     dry_run=True finds streams and logs what it would do without writing.
+
+    Note: replacement links are fetched from onlineradiobox only (DB_PLATFORMS),
+    regardless of `platform_names`. The `platform_names` argument is retained for
+    CLI compatibility but ignored by the DB workflow; the query/CSV mode still
+    honours the user's platform selection.
     """
     if mode == "agent":
         config.require_openai()
+
+    if platform_names and list(platform_names) != DB_PLATFORMS:
+        log.info(
+            "DB workflow fetches from %s only; ignoring --platforms %s.",
+            ", ".join(DB_PLATFORMS), ", ".join(platform_names),
+        )
 
     # Import here so rule mode doesn't require OpenAI to be importable.
     from .agent import run_agent
@@ -186,7 +232,7 @@ async def process_pending(
                 #    name+country relevance filter, then resolve+verify each
                 #    survivor's stream. Agent mode: delegate to the LLM agent.
                 results: list[StationResult] = []
-                for name in platform_names:
+                for name in DB_PLATFORMS:
                     platform = get_platform(name)
                     _apply_config_to_platform(platform, config)
                     page = await browser.new_page()
@@ -206,7 +252,7 @@ async def process_pending(
                     finally:
                         await page.close()
 
-                best = _best_stream(rel_q, results)
+                best = _best_stream(rel_q, results, st)
 
                 # 3) In agent mode results aren't pre-verified, so confirm the
                 #    chosen candidate actually plays before saving it. In rule

@@ -72,6 +72,62 @@ def country_hint(query: str) -> str:
     return ""
 
 
+# A frequency token anywhere in a string, e.g. "104.9", "97,1", "88 MHz", "FM 92.3".
+# Captures the numeric dial value so a DB freq can be compared against a
+# candidate's name/description regardless of surrounding FM/AM/MHz wording.
+_FREQ_NUM_RE = re.compile(r"\b(\d{2,3}(?:[.,]\d)?)\b")
+
+
+def frequencies(text: str) -> set[str]:
+    """All dial-number-like tokens in `text`, normalised (comma -> dot).
+
+    e.g. "Heart 104.9 FM" -> {"104.9"}, "FM 92,3" -> {"92.3"}. Used to compare
+    a DB station's st_freq against a candidate's name/description.
+    """
+    if not text:
+        return set()
+    out: set[str] = set()
+    for m in _FREQ_NUM_RE.findall(text):
+        out.add(m.replace(",", "."))
+    return out
+
+
+def frequency_matches(db_freq: str, *texts: str) -> bool:
+    """True if the DB frequency appears in any of the candidate texts.
+
+    Soft signal only - callers use it to boost a candidate's score, never to
+    reject. Returns False when the DB has no frequency (nothing to match on).
+    """
+    wanted = frequencies(db_freq)
+    if not wanted:
+        return False
+    found: set[str] = set()
+    for t in texts:
+        found |= frequencies(t)
+    return bool(wanted & found)
+
+
+def _place_tokens(text: str) -> set[str]:
+    """Distinctive (non-stopword, non-number) tokens for a place name."""
+    return {t for t in _tokens(text) if t not in _STOPWORDS and not t.isdigit()}
+
+
+def place_matches(db_place: str, *texts: str) -> bool:
+    """True if a city/state name appears in any candidate text.
+
+    Matches on distinctive place tokens (e.g. "cape"/"town" from "Cape Town"),
+    so partial location strings still register. Soft signal only; returns False
+    when the DB has no city/state value.
+    """
+    wanted = _place_tokens(db_place)
+    if not wanted:
+        return False
+    found: set[str] = set()
+    for t in texts:
+        found |= _place_tokens(t)
+    return bool(wanted & found)
+
+
 def country_matches(query_country: str, result_country: str) -> bool:
     """True if the result's country is compatible with the query's country.
 
@@ -137,3 +193,33 @@ def is_relevant(query: str, name: str, result_country: str = "") -> bool:
         return True
     # Otherwise require at least two shared distinctive tokens.
     return len(shared) >= 2
+
+
+def location_score(
+    *,
+    db_freq: str = "",
+    db_city: str = "",
+    db_state: str = "",
+    name: str = "",
+    description: str = "",
+) -> int:
+    """Soft-matching score for a candidate against a DB station's location/freq.
+
+    Country is handled as a HARD gate elsewhere (is_relevant); this function
+    only produces *positive* signals used to rank already-relevant candidates:
+
+      +2  the DB frequency (st_freq) appears in the candidate name/description
+      +1  the DB city appears in the candidate name/description
+      +1  the DB state appears in the candidate name/description
+
+    A higher score means a better location/frequency match. Missing DB fields
+    simply contribute 0 - they never penalise a candidate.
+    """
+    score = 0
+    if frequency_matches(db_freq, name, description):
+        score += 2
+    if place_matches(db_city, name, description):
+        score += 1
+    if place_matches(db_state, name, description):
+        score += 1
+    return score

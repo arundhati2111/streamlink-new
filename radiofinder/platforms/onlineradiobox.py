@@ -53,12 +53,22 @@ class OnlineRadioBox(Platform):
                         const a = row.querySelector('a[href]');
                         if (a) href = a.href;
                     }
+                    // Grab any nearby descriptive text (genre/subtitle/location
+                    // line) so the workflow can soft-match city/state/frequency.
+                    let desc = '';
+                    if (row) {
+                        const d = row.querySelector(
+                            '.station__meta, .stations__station__description, .subtitle, .genre'
+                        );
+                        if (d) desc = (d.textContent || '').replace(/\\s+/g, ' ').trim();
+                    }
                     out.push({
                         name: play.getAttribute('radioname') || '',
                         stream,
                         streamtype: play.getAttribute('streamtype') || '',
                         page_url: href,
                         station_id: play.getAttribute('radioid') || '',
+                        description: desc,
                     });
                 });
                 return out;
@@ -82,6 +92,7 @@ class OnlineRadioBox(Platform):
                     page_url=r.get("page_url") or "",
                     station_id=rid,
                     stream_url=stream,  # stream already known from the DOM
+                    description=r.get("description") or "",
                 )
             )
         return cands
@@ -101,6 +112,7 @@ class OnlineRadioBox(Platform):
             page_url=cand.page_url,
             station_id=cand.station_id,
             mode="rule",
+            description=cand.description,
         )
 
 

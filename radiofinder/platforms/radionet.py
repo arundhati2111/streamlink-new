@@ -69,6 +69,14 @@ class RadioNet(Platform):
             if not url:
                 continue
             slug = item.get("id") or ""
+            # The API often carries a city and a short slogan/genres; fold them
+            # into a description so the DB workflow can soft-match city/freq.
+            desc_bits = [
+                str(item.get("city") or ""),
+                str(item.get("genres") or ""),
+                str(item.get("shortDescription") or item.get("description") or ""),
+            ]
+            description = " ".join(b for b in desc_bits if b).strip()
             cands.append(
                 Candidate(
                     platform=self.name,
@@ -77,6 +85,7 @@ class RadioNet(Platform):
                     page_url=f"{BASE}/s/{slug}" if slug else "",
                     station_id=slug,
                     stream_url=url,
+                    description=description,
                 )
             )
         return cands
@@ -94,6 +103,7 @@ class RadioNet(Platform):
             page_url=cand.page_url,
             station_id=cand.station_id,
             mode="rule",
+            description=cand.description,
         )
 
 
